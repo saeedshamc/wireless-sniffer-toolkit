@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+*.pcapng
+*.cap
+venv/
+.venv/
