@@ -173,6 +173,7 @@ class TestProcessUtils(unittest.TestCase):
         err = ensure_process_started(proc, grace_seconds=0.3)
         self.assertTrue(err)
         self.assertFalse(process_is_alive(proc))
+        terminate_process(proc)
 
 
 class TestCaptureHealthApi(unittest.TestCase):
