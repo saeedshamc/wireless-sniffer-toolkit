@@ -2,10 +2,11 @@
 core/platform_utils.py — تشخیص سیستم‌عامل و پیدا کردن ابزارهای لازم روی هرکدوم
 """
 
-import platform
-import shutil
 import glob
 import os
+import platform
+import shutil
+import subprocess
 
 
 def current_platform() -> str:
@@ -19,16 +20,45 @@ def current_platform() -> str:
     return "unknown"
 
 
+def _wireshark_dir_candidates() -> list:
+    plat = current_platform()
+    if plat == "windows":
+        return [
+            r"C:\Program Files\Wireshark",
+            r"C:\Program Files (x86)\Wireshark",
+        ]
+    if plat == "macos":
+        return [
+            "/Applications/Wireshark.app/Contents/MacOS",
+            "/usr/local/bin",
+            "/opt/homebrew/bin",
+        ]
+    return ["/usr/bin", "/usr/local/bin"]
+
+
 def find_tshark() -> str:
     """مسیر tshark رو پیدا می‌کنه (روی ویندوز معمولاً کنار Wireshark نصب می‌شه)."""
     found = shutil.which("tshark")
     if found:
         return found
-    if current_platform() == "windows":
-        candidates = glob.glob(r"C:\Program Files\Wireshark\tshark.exe") + \
-                     glob.glob(r"C:\Program Files (x86)\Wireshark\tshark.exe")
-        if candidates:
-            return candidates[0]
+    name = "tshark.exe" if current_platform() == "windows" else "tshark"
+    for directory in _wireshark_dir_candidates():
+        candidate = os.path.join(directory, name)
+        if os.path.isfile(candidate):
+            return candidate
+    return ""
+
+
+def find_mergecap() -> str:
+    """مسیر mergecap برای ترکیب فایل‌های کپچر (عمدتاً مک)."""
+    found = shutil.which("mergecap")
+    if found:
+        return found
+    name = "mergecap.exe" if current_platform() == "windows" else "mergecap"
+    for directory in _wireshark_dir_candidates():
+        candidate = os.path.join(directory, name)
+        if os.path.isfile(candidate):
+            return candidate
     return ""
 
 
@@ -62,5 +92,57 @@ def is_admin() -> bool:
             return ctypes.windll.shell32.IsUserAnAdmin() != 0
         except Exception:
             return False
-    else:
+    try:
         return os.geteuid() == 0
+    except AttributeError:
+        return False
+
+
+def list_tshark_interfaces(tshark_path: str) -> list:
+    """
+    لیست اینترفیس‌ها از خروجی `tshark -D`.
+    هر آیتم یک dict با کلیدهای: index, name, description
+    """
+    if not tshark_path:
+        return []
+    try:
+        result = subprocess.run(
+            [tshark_path, "-D"],
+            capture_output=True, text=True, timeout=15,
+            creationflags=_subprocess_no_window(),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+
+    interfaces = []
+    for line in (result.stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # قالب: "1. eth0" یا '1. \Device\NPF_{GUID} (Wi-Fi)'
+        try:
+            num_part, rest = line.split(".", 1)
+            index = int(num_part.strip())
+        except ValueError:
+            continue
+        rest = rest.strip()
+        description = ""
+        name = rest
+        if rest.endswith(")") and "(" in rest:
+            name, desc = rest.rsplit("(", 1)
+            name = name.strip()
+            description = desc.rstrip(")").strip()
+        interfaces.append({
+            "index": index,
+            "name": name,
+            "description": description,
+            "display": f"{description} [{name}]" if description else name,
+        })
+    return interfaces
+
+
+def _subprocess_no_window() -> int:
+    """روی ویندوز از باز شدن پنجرهٔ کنسول برای subprocess جلوگیری می‌کنه."""
+    if current_platform() == "windows":
+        return getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    return 0
