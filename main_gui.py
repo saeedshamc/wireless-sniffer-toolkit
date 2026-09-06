@@ -14,6 +14,7 @@ main_gui.py — Wi-Fi Monitor Suite (نسخه ۲)
 import os
 import sys
 import threading
+import time
 
 from PySide6.QtCore import Qt, QTimer, Signal, QObject
 from PySide6.QtWidgets import (
@@ -27,6 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from core.engine_factory import create_engine
 from core.base_engine import EngineError
 from core.platform_utils import current_platform
+from core.export_utils import write_networks_csv
 
 
 DARK_STYLESHEET = """
@@ -63,7 +65,7 @@ class WifiMonitorApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Wi-Fi Monitor Suite v2")
-        self.resize(960, 680)
+        self.resize(1020, 720)
         self.setLayoutDirection(Qt.RightToLeft)
 
         self.bridge = Bridge()
@@ -74,7 +76,10 @@ class WifiMonitorApp(QMainWindow):
 
         self.engine = create_engine(on_log=lambda msg: self.bridge.log_signal.emit(msg))
         self._last_network_fingerprint = None
+        self._networks_cache = {}
         self._busy = False
+        self._session_started_at = None
+        self._capture_dead_warned = False
 
         self._build_ui()
         self._refresh_interfaces()
@@ -120,6 +125,12 @@ class WifiMonitorApp(QMainWindow):
         browse_btn.clicked.connect(self._choose_output)
         grid.addWidget(browse_btn, 1, 6)
 
+        grid.addWidget(QLabel("فیلتر جدول:"), 2, 0)
+        self.filter_edit = QLineEdit()
+        self.filter_edit.setPlaceholderText("SSID یا BSSID...")
+        self.filter_edit.textChanged.connect(self._apply_filter_to_table)
+        grid.addWidget(self.filter_edit, 2, 1, 1, 6)
+
         root.addWidget(controls)
 
         action_row = QHBoxLayout()
@@ -130,8 +141,16 @@ class WifiMonitorApp(QMainWindow):
         self.stop_btn.setObjectName("stopBtn")
         self.stop_btn.setEnabled(False)
         self.stop_btn.clicked.connect(self._on_stop)
+
+        export_btn = QPushButton("خروجی CSV")
+        export_btn.clicked.connect(self._export_csv)
+        clear_log_btn = QPushButton("پاک‌کردن لاگ")
+        clear_log_btn.clicked.connect(self._clear_log)
+
         action_row.addWidget(self.start_btn)
         action_row.addWidget(self.stop_btn)
+        action_row.addWidget(export_btn)
+        action_row.addWidget(clear_log_btn)
         action_row.addStretch()
 
         self.status_label = QLabel("غیرفعال")
@@ -147,9 +166,11 @@ class WifiMonitorApp(QMainWindow):
         self.channel_stat = self._make_stat_box("کانال فعلی", "-")
         self.packet_stat = self._make_stat_box("تعداد بسته‌ها", "0")
         self.network_stat = self._make_stat_box("شبکه‌های یافت‌شده", "0")
+        self.elapsed_stat = self._make_stat_box("مدت سشن", "00:00")
         stats_row.addWidget(self.channel_stat)
         stats_row.addWidget(self.packet_stat)
         stats_row.addWidget(self.network_stat)
+        stats_row.addWidget(self.elapsed_stat)
         root.addLayout(stats_row)
 
         splitter = QSplitter(Qt.Vertical)
@@ -161,12 +182,13 @@ class WifiMonitorApp(QMainWindow):
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setSortingEnabled(True)
+        self.table.setAlternatingRowColors(True)
         splitter.addWidget(self.table)
 
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
         splitter.addWidget(self.log_text)
-        splitter.setSizes([380, 160])
+        splitter.setSizes([400, 160])
 
         root.addWidget(splitter, stretch=1)
 
@@ -209,7 +231,6 @@ class WifiMonitorApp(QMainWindow):
         else:
             self.ready_label.setObjectName("readyOk")
             self.ready_label.setText("پیش‌نیازها آماده‌اند.")
-        # برای اعمال مجدد stylesheet روی objectName
         self.ready_label.style().unpolish(self.ready_label)
         self.ready_label.style().polish(self.ready_label)
 
@@ -241,10 +262,48 @@ class WifiMonitorApp(QMainWindow):
         self.packet_stat.value_label.setText("0")
         self.network_stat.value_label.setText("0")
         self.channel_stat.value_label.setText("-")
+        self.elapsed_stat.value_label.setText("00:00")
         self.table.setSortingEnabled(False)
         self.table.setRowCount(0)
         self.table.setSortingEnabled(True)
         self._last_network_fingerprint = None
+        self._networks_cache = {}
+        self._capture_dead_warned = False
+
+    def _clear_log(self):
+        self.log_text.clear()
+
+    def _filtered_networks(self, networks: dict) -> dict:
+        q = self.filter_edit.text().strip().lower()
+        if not q:
+            return networks
+        out = {}
+        for bssid, info in networks.items():
+            ssid = str(info.get("ssid", "")).lower()
+            if q in bssid.lower() or q in ssid:
+                out[bssid] = info
+        return out
+
+    def _apply_filter_to_table(self):
+        self._last_network_fingerprint = None
+        self._update_table(self._networks_cache)
+
+    def _export_csv(self):
+        if not self._networks_cache:
+            QMessageBox.information(self, "خروجی CSV", "هنوز شبکه‌ای برای خروجی نیست.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "ذخیره CSV", os.path.join(os.getcwd(), "networks.csv"), "CSV (*.csv)"
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".csv"):
+            path += ".csv"
+        try:
+            write_networks_csv(path, self._networks_cache)
+            self._append_log(f"CSV ذخیره شد: {path}")
+        except OSError as e:
+            QMessageBox.critical(self, "خطا", f"ذخیره CSV ناموفق: {e}")
 
     # ---------------- منطق ----------------
     def _on_start(self):
@@ -294,6 +353,7 @@ class WifiMonitorApp(QMainWindow):
 
     def _on_started_ui(self):
         self._busy = False
+        self._session_started_at = time.monotonic()
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.iface_combo.setEnabled(False)
@@ -303,6 +363,7 @@ class WifiMonitorApp(QMainWindow):
 
     def _on_stopped_ui(self):
         self._busy = False
+        self._session_started_at = None
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.iface_combo.setEnabled(True)
@@ -314,6 +375,7 @@ class WifiMonitorApp(QMainWindow):
 
     def _on_error_ui(self, message: str):
         self._busy = False
+        self._session_started_at = None
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.iface_combo.setEnabled(True)
@@ -324,25 +386,53 @@ class WifiMonitorApp(QMainWindow):
         QMessageBox.critical(self, "خطا", message)
         self._refresh_readiness()
 
+    def _format_elapsed(self) -> str:
+        if not self._session_started_at:
+            return "00:00"
+        secs = int(time.monotonic() - self._session_started_at)
+        mm, ss = divmod(secs, 60)
+        hh, mm = divmod(mm, 60)
+        if hh:
+            return f"{hh:02d}:{mm:02d}:{ss:02d}"
+        return f"{mm:02d}:{ss:02d}"
+
     def _poll_state(self):
         if not self.engine.state.running:
             return
+
+        health = self.engine.capture_health()
+        if not health.get("capture_alive", True) and not self._capture_dead_warned:
+            self._capture_dead_warned = True
+            self._append_log("[هشدار] فرآیند کپچر متوقف شده — سشن را Stop کنید.")
+            self.status_label.setText("کپچر قطع شد")
+
         ch = self.engine.current_channel()
         if ch is not None:
             self.channel_stat.value_label.setText(str(ch))
 
         total, networks = self.engine.get_live_stats()
+        self._networks_cache = networks
         self.packet_stat.value_label.setText(str(total))
         self.network_stat.value_label.setText(str(len(networks)))
+        self.elapsed_stat.value_label.setText(self._format_elapsed())
         self._update_table(networks)
 
     def _update_table(self, networks: dict):
-        # فقط وقتی داده عوض شده جدول را بازنویسی کن تا سورت/فلیکر کمتر شود
-        fingerprint = tuple(
-            sorted(
-                (bssid, info.get("ssid"), info.get("channel"), info.get("last_signal"), info.get("count"))
-                for bssid, info in networks.items()
-            )
+        visible = self._filtered_networks(networks)
+        fingerprint = (
+            self.filter_edit.text().strip().lower(),
+            tuple(
+                sorted(
+                    (
+                        bssid,
+                        info.get("ssid"),
+                        info.get("channel"),
+                        info.get("last_signal"),
+                        info.get("count"),
+                    )
+                    for bssid, info in visible.items()
+                )
+            ),
         )
         if fingerprint == self._last_network_fingerprint:
             return
@@ -350,9 +440,9 @@ class WifiMonitorApp(QMainWindow):
 
         sorting = self.table.isSortingEnabled()
         self.table.setSortingEnabled(False)
-        self.table.setRowCount(len(networks))
+        self.table.setRowCount(len(visible))
         for row, (bssid, info) in enumerate(
-            sorted(networks.items(), key=lambda kv: -kv[1].get("count", 0))
+            sorted(visible.items(), key=lambda kv: -kv[1].get("count", 0))
         ):
             self.table.setItem(row, 0, QTableWidgetItem(info.get("ssid", "")))
             self.table.setItem(row, 1, QTableWidgetItem(bssid))
@@ -383,7 +473,6 @@ class WifiMonitorApp(QMainWindow):
 
 
 def main():
-    # روی ویندوز High-DPI
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
