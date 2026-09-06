@@ -98,24 +98,13 @@ def is_admin() -> bool:
         return False
 
 
-def list_tshark_interfaces(tshark_path: str) -> list:
+def parse_tshark_interfaces_output(stdout: str) -> list:
     """
-    لیست اینترفیس‌ها از خروجی `tshark -D`.
-    هر آیتم یک dict با کلیدهای: index, name, description
+    پارس متن خروجی `tshark -D` به لیست dictها.
+    کلیدها: index, name, description, display
     """
-    if not tshark_path:
-        return []
-    try:
-        result = subprocess.run(
-            [tshark_path, "-D"],
-            capture_output=True, text=True, timeout=15,
-            creationflags=_subprocess_no_window(),
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return []
-
     interfaces = []
-    for line in (result.stdout or "").splitlines():
+    for line in (stdout or "").splitlines():
         line = line.strip()
         if not line:
             continue
@@ -141,8 +130,37 @@ def list_tshark_interfaces(tshark_path: str) -> list:
     return interfaces
 
 
-def _subprocess_no_window() -> int:
+def list_tshark_interfaces(tshark_path: str) -> list:
+    """لیست اینترفیس‌ها از خروجی `tshark -D`."""
+    if not tshark_path:
+        return []
+    try:
+        result = subprocess.run(
+            [tshark_path, "-D"],
+            capture_output=True, text=True, timeout=15,
+            creationflags=subprocess_creationflags(),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    return parse_tshark_interfaces_output(result.stdout or "")
+
+
+def looks_like_wireless(description: str, name: str = "") -> bool:
+    """حدس می‌زند اینترفیس وای‌فای است (برای فیلتر لیست روی ویندوز/مک)."""
+    blob = f"{description} {name}".lower()
+    keywords = (
+        "wi-fi", "wifi", "wireless", "wlan", "802.11", "airport",
+        "atheros", "ralink", "realtek", "mediatek", "broadcom",
+    )
+    return any(k in blob for k in keywords)
+
+
+def subprocess_creationflags() -> int:
     """روی ویندوز از باز شدن پنجرهٔ کنسول برای subprocess جلوگیری می‌کنه."""
     if current_platform() == "windows":
         return getattr(subprocess, "CREATE_NO_WINDOW", 0)
     return 0
+
+
+# سازگاری با importهای قبلی داخل پکیج
+_subprocess_no_window = subprocess_creationflags
