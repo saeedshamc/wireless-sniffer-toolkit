@@ -16,4 +16,7 @@ def create_engine(on_log=None):
     if plat == "macos":
         from .engine_macos import MacOSEngine
         return MacOSEngine(on_log=on_log)
-    raise RuntimeError(f"سیستم‌عامل «{plat}» پشتیبانی نمی‌شه.")
+    raise RuntimeError(
+        f"سیستم‌عامل «{plat}» پشتیبانی نمی‌شه. "
+        "فقط linux / windows / macos پشتیبانی می‌شن."
+    )

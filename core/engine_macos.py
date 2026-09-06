@@ -22,16 +22,16 @@ import shutil
 import subprocess
 import tempfile
 import threading
-import time
 
 from .base_engine import BaseEngine, EngineError, channels_for_band
-from .platform_utils import find_tshark, find_airport_binary, is_admin
+from .platform_utils import find_tshark, find_airport_binary, find_mergecap, is_admin
 
 
 def _run(cmd, check=False, timeout=None):
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     if check and result.returncode != 0:
-        raise EngineError(f"{' '.join(cmd)} -> {result.stderr.strip()}")
+        err = (result.stderr or result.stdout or "").strip()
+        raise EngineError(f"{' '.join(cmd)} -> {err}")
     return result
 
 
@@ -41,6 +41,7 @@ class MacOSEngine(BaseEngine):
         "ابزار airport فقط روی مک‌های قدیمی‌تر (اینتلی/Broadcom) موجوده و روی مک‌های "
         "اپل‌سیلیکون و نسخه‌های جدید macOS معمولاً وجود نداره.",
         "channel hopping با فراخوانی مکرر airport شبیه‌سازی می‌شه، نه واقعاً همزمان.",
+        "آمار زنده SSID روی این موتور در دسترس نیست (کپچر ناپیوسته).",
         "این بخش تست‌نشده روی سخت‌افزار واقعیه؛ اگه airport نبود، از یک ابزار مانیتورینگ "
         "جایگزین مثل Wireshark به‌همراه یک آداپتور USB خارجی سازگار استفاده کنید.",
     ]
@@ -51,35 +52,59 @@ class MacOSEngine(BaseEngine):
         self._worker_thread = None
         self.tshark_path = find_tshark()
         self.airport_path = find_airport_binary()
+        self.mergecap_path = find_mergecap()
         self._tmp_dir = None
         self._final_output = None
+        self._channels_seen = 0
 
     def check_ready(self) -> list:
         problems = []
         if not is_admin():
             problems.append("این برنامه باید با sudo اجرا بشه.")
         if not self.airport_path:
-            problems.append("ابزار airport روی این مک پیدا نشد — این مک احتمالاً از "
-                             "مانیتور مود پشتیبانی نمی‌کنه.")
-        if not shutil.which("mergecap") and not self.tshark_path:
-            problems.append("mergecap/Wireshark پیدا نشد (برای ترکیب کپچرهای هر کانال لازمه).")
+            problems.append(
+                "ابزار airport روی این مک پیدا نشد — این مک احتمالاً از "
+                "مانیتور مود پشتیبانی نمی‌کنه."
+            )
+        if not self.mergecap_path and not self.tshark_path:
+            problems.append(
+                "mergecap/Wireshark پیدا نشد (برای ترکیب کپچرهای هر کانال لازمه)."
+            )
         return problems
 
     def list_interfaces(self) -> list:
+        # ترجیح: فقط اینترفیس‌های وای‌فای واقعی از networksetup
+        if shutil.which("networksetup"):
+            result = _run(["networksetup", "-listallhardwareports"])
+            wifi = []
+            lines = (result.stdout or "").splitlines()
+            current_port = ""
+            for line in lines:
+                if line.startswith("Hardware Port:"):
+                    current_port = line.split(":", 1)[1].strip().lower()
+                elif line.startswith("Device:") and current_port:
+                    dev = line.split(":", 1)[1].strip()
+                    if any(k in current_port for k in ("wi-fi", "wifi", "airport")):
+                        wifi.append(dev)
+                    current_port = ""
+            if wifi:
+                return wifi
+
         result = _run(["ifconfig", "-l"])
-        return [i for i in result.stdout.split() if i.startswith("en")]
+        return [i for i in (result.stdout or "").split() if i.startswith("en")]
 
     def _hop_and_capture(self, iface: str, channels: list, dwell: float):
         idx = 0
         while not self._stop_event.is_set():
             ch = channels[idx % len(channels)]
             self._current_channel = ch
-            tmp_file = os.path.join(self._tmp_dir, f"ch{ch}_{idx}.cap")
+            tmp_file = os.path.join(self._tmp_dir, f"ch{ch}_{idx:05d}.cap")
             self._log(f"کپچر کانال {ch} برای {dwell} ثانیه ...")
+            before = set(glob.glob("/tmp/airportSniff*.cap"))
             try:
                 proc = subprocess.Popen(
                     [self.airport_path, iface, "sniff", str(ch)],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 )
                 self._stop_event.wait(dwell)
                 proc.terminate()
@@ -87,10 +112,17 @@ class MacOSEngine(BaseEngine):
                     proc.wait(timeout=3)
                 except subprocess.TimeoutExpired:
                     proc.kill()
+                    proc.wait(timeout=2)
                 # airport خروجی رو خودش در /tmp/airportSniffXXXXXX.cap می‌نویسه
-                default_caps = sorted(glob.glob("/tmp/airportSniff*.cap"), key=os.path.getmtime)
-                if default_caps:
-                    shutil.move(default_caps[-1], tmp_file)
+                after = set(glob.glob("/tmp/airportSniff*.cap"))
+                new_caps = sorted(after - before, key=os.path.getmtime)
+                if not new_caps:
+                    # fallback: جدیدترین فایل
+                    all_caps = sorted(glob.glob("/tmp/airportSniff*.cap"), key=os.path.getmtime)
+                    new_caps = all_caps[-1:] if all_caps else []
+                if new_caps:
+                    shutil.move(new_caps[-1], tmp_file)
+                    self._channels_seen += 1
             except Exception as e:
                 self._log(f"خطا در کانال {ch}: {e}")
             idx += 1
@@ -101,12 +133,19 @@ class MacOSEngine(BaseEngine):
         problems = self.check_ready()
         if problems:
             raise EngineError(" | ".join(problems))
+        if not iface:
+            raise EngineError("اینترفیس مشخص نشده.")
+
+        out_dir = os.path.dirname(os.path.abspath(output_path)) or "."
+        if not os.path.isdir(out_dir):
+            raise EngineError(f"پوشهٔ خروجی وجود ندارد: {out_dir}")
 
         channels = channels_for_band(band)
         self.state.original_iface = iface
         self.state.monitor_iface = iface
         self._final_output = output_path
         self._tmp_dir = tempfile.mkdtemp(prefix="wifi_monitor_mac_")
+        self._channels_seen = 0
 
         self._stop_event.clear()
         self._worker_thread = threading.Thread(
@@ -114,10 +153,11 @@ class MacOSEngine(BaseEngine):
         )
         self._worker_thread.start()
         self.state.running = True
+        self._log("کپچر ناپیوستهٔ کانال‌ها شروع شد (experimental).")
 
     def get_live_stats(self):
-        # روی مک به‌دلیل ماهیت غیرپیوسته‌ی کپچر، آمار زنده‌ی دقیق در دسترس نیست.
-        return 0, {}
+        # آمار دقیق بسته نداریم؛ تعداد فایل‌های کانال دیده‌شده را به عنوان پروکسی می‌دهیم
+        return self._channels_seen, {}
 
     def stop(self):
         if not self.state.running:
@@ -125,21 +165,30 @@ class MacOSEngine(BaseEngine):
         self._log("در حال توقف و ترکیب فایل‌های کپچر ...")
         self._stop_event.set()
         if self._worker_thread:
-            self._worker_thread.join(timeout=5)
+            self._worker_thread.join(timeout=max(5.0, 1.0))
+        self._worker_thread = None
 
-        cap_files = sorted(glob.glob(os.path.join(self._tmp_dir, "*.cap")))
-        merge_tool = shutil.which("mergecap")
+        cap_files = sorted(glob.glob(os.path.join(self._tmp_dir or "", "*.cap")))
+        merge_tool = self.mergecap_path or find_mergecap()
         try:
             if cap_files and merge_tool:
                 _run([merge_tool, "-w", self._final_output] + cap_files, check=True)
                 self._log(f"کپچر ترکیبی ذخیره شد در: {self._final_output}")
             elif cap_files:
                 shutil.copy(cap_files[-1], self._final_output)
-                self._log(f"فقط آخرین کانال ذخیره شد (mergecap موجود نبود): {self._final_output}")
+                self._log(
+                    f"فقط آخرین کانال ذخیره شد (mergecap موجود نبود): {self._final_output}"
+                )
             else:
                 self._log("هیچ فایل کپچری تولید نشد.")
+        except EngineError as e:
+            self._log(f"خطا در ترکیب فایل‌ها: {e}")
         finally:
-            shutil.rmtree(self._tmp_dir, ignore_errors=True)
+            if self._tmp_dir:
+                shutil.rmtree(self._tmp_dir, ignore_errors=True)
+            self._tmp_dir = None
 
+        self._current_channel = None
+        self.state.monitor_iface = ""
         self.state.running = False
         self._log("متوقف شد.")
