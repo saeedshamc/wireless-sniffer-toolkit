@@ -76,3 +76,15 @@ class BaseEngine:
     def get_live_stats(self):
         """(total_packets, networks_dict) — پیش‌فرض خالی برای پلتفرم‌های بدون نمایش زنده."""
         return 0, {}
+
+    def is_capture_alive(self) -> bool:
+        """آیا فرآیند اصلی کپچر هنوز زنده است؟ (پیش‌فرض: اگر running باشد True)."""
+        return bool(self.state.running)
+
+    def capture_health(self) -> dict:
+        """وضعیت سلامت سشن برای GUI."""
+        return {
+            "running": self.state.running,
+            "capture_alive": self.is_capture_alive(),
+            "channel": self._current_channel,
+        }

@@ -19,6 +19,7 @@ from core.platform_utils import (
     subprocess_creationflags,
 )
 from core.engine_factory import create_engine
+from core.process_utils import process_is_alive, terminate_process, ensure_process_started
 
 
 class TestChannels(unittest.TestCase):
@@ -141,6 +142,46 @@ class TestSubprocessFlags(unittest.TestCase):
     def test_flags_type(self):
         flags = subprocess_creationflags()
         self.assertIsInstance(flags, int)
+
+
+class TestProcessUtils(unittest.TestCase):
+    def test_terminate_none(self):
+        terminate_process(None)
+
+    def test_process_is_alive_none(self):
+        self.assertFalse(process_is_alive(None))
+
+    def test_ensure_started_alive(self):
+        import subprocess
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(2)"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+        )
+        try:
+            err = ensure_process_started(proc, grace_seconds=0.2)
+            self.assertEqual(err, "")
+            self.assertTrue(process_is_alive(proc))
+        finally:
+            terminate_process(proc, timeout=2)
+
+    def test_ensure_started_dead(self):
+        import subprocess
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "raise SystemExit(3)"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+        )
+        err = ensure_process_started(proc, grace_seconds=0.3)
+        self.assertTrue(err)
+        self.assertFalse(process_is_alive(proc))
+
+
+class TestCaptureHealthApi(unittest.TestCase):
+    def test_health_when_idle(self):
+        engine = create_engine()
+        health = engine.capture_health()
+        self.assertFalse(health["running"])
+        self.assertFalse(health["capture_alive"])
+        self.assertIsNone(health["channel"])
 
 
 if __name__ == "__main__":

@@ -19,14 +19,15 @@ from .base_engine import BaseEngine, EngineError, channels_for_band
 from .capture_display import LiveDisplayReader
 from .platform_utils import (
     find_tshark, find_wlan_helper, is_admin,
-    list_tshark_interfaces, _subprocess_no_window,
+    list_tshark_interfaces, looks_like_wireless, subprocess_creationflags,
 )
+from .process_utils import terminate_process, process_is_alive, ensure_process_started
 
 
 def _run(cmd, check=False):
     result = subprocess.run(
         cmd, capture_output=True, text=True,
-        creationflags=_subprocess_no_window(),
+        creationflags=subprocess_creationflags(),
     )
     if check and result.returncode != 0:
         err = (result.stderr or result.stdout or "").strip()
@@ -75,18 +76,27 @@ class WindowsEngine(BaseEngine):
         labels = []
 
         tshark_ifaces = list_tshark_interfaces(self.tshark_path)
+        wireless = []
+        others = []
         for info in tshark_ifaces:
             label = info["display"]
             wlan_name = info["description"] or info["name"]
-            # اگر نام دستگاه GUID دارد، همان را هم نگه می‌داریم
             guid_match = re.search(r"\{[0-9A-Fa-f-]{36}\}", info["name"])
             guid = guid_match.group(0) if guid_match else ""
-            self._iface_map[label] = {
+            meta = {
                 "tshark": info["name"],
                 "wlan": wlan_name,
                 "guid": guid,
                 "index": str(info["index"]),
             }
+            if looks_like_wireless(info["description"], info["name"]):
+                wireless.append((label, meta))
+            else:
+                others.append((label, meta))
+
+        chosen = wireless or others
+        for label, meta in chosen:
+            self._iface_map[label] = meta
             labels.append(label)
 
         if labels:
@@ -190,12 +200,20 @@ class WindowsEngine(BaseEngine):
             self._capture_proc = subprocess.Popen(
                 [self.tshark_path, "-i", tshark_iface, "-w", output_path],
                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
-                creationflags=_subprocess_no_window(),
+                creationflags=subprocess_creationflags(),
             )
         except OSError as e:
             self._stop_event.set()
             self._disable_monitor_mode(active_wlan)
             raise EngineError(f"اجرای tshark ناموفق: {e}") from e
+
+        early_err = ensure_process_started(self._capture_proc)
+        if early_err:
+            self._stop_event.set()
+            terminate_process(self._capture_proc)
+            self._capture_proc = None
+            self._disable_monitor_mode(active_wlan)
+            raise EngineError(f"tshark بلافاصله خارج شد: {early_err[:300]}")
 
         self._display_reader = LiveDisplayReader(
             self.tshark_path, tshark_iface, on_error=self._log
@@ -209,6 +227,9 @@ class WindowsEngine(BaseEngine):
             return self._display_reader.snapshot()
         return 0, {}
 
+    def is_capture_alive(self) -> bool:
+        return process_is_alive(self._capture_proc)
+
     def stop(self):
         if not self.state.running:
             return
@@ -218,13 +239,8 @@ class WindowsEngine(BaseEngine):
             self._hopper_thread.join(timeout=2.0)
         self._hopper_thread = None
 
-        if self._capture_proc:
-            self._capture_proc.terminate()
-            try:
-                self._capture_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self._capture_proc.kill()
-            self._capture_proc = None
+        terminate_process(self._capture_proc)
+        self._capture_proc = None
 
         if self._display_reader:
             self._display_reader.stop()

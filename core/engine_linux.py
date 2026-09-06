@@ -11,6 +11,7 @@ import threading
 from .base_engine import BaseEngine, EngineError, channels_for_band
 from .capture_display import LiveDisplayReader
 from .platform_utils import find_tshark, is_admin
+from .process_utils import terminate_process, process_is_alive, ensure_process_started
 
 
 def _run(cmd, check=False):
@@ -168,6 +169,14 @@ class LinuxEngine(BaseEngine):
             self._disable_monitor_mode(mon_iface, iface)
             raise EngineError(f"اجرای tshark ناموفق: {e}") from e
 
+        early_err = ensure_process_started(self._capture_proc)
+        if early_err:
+            self._stop_event.set()
+            terminate_process(self._capture_proc)
+            self._capture_proc = None
+            self._disable_monitor_mode(mon_iface, iface)
+            raise EngineError(f"tshark بلافاصله خارج شد: {early_err[:300]}")
+
         self._display_reader = LiveDisplayReader(
             self.tshark_path, mon_iface, on_error=self._log
         )
@@ -180,6 +189,9 @@ class LinuxEngine(BaseEngine):
             return self._display_reader.snapshot()
         return 0, {}
 
+    def is_capture_alive(self) -> bool:
+        return process_is_alive(self._capture_proc)
+
     def stop(self):
         if not self.state.running:
             return
@@ -189,13 +201,8 @@ class LinuxEngine(BaseEngine):
             self._hopper_thread.join(timeout=2.0)
         self._hopper_thread = None
 
-        if self._capture_proc:
-            self._capture_proc.terminate()
-            try:
-                self._capture_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self._capture_proc.kill()
-            self._capture_proc = None
+        terminate_process(self._capture_proc)
+        self._capture_proc = None
 
         if self._display_reader:
             self._display_reader.stop()

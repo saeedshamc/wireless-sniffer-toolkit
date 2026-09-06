@@ -25,6 +25,7 @@ import threading
 
 from .base_engine import BaseEngine, EngineError, channels_for_band
 from .platform_utils import find_tshark, find_airport_binary, find_mergecap, is_admin
+from .process_utils import terminate_process
 
 
 def _run(cmd, check=False, timeout=None):
@@ -56,6 +57,7 @@ class MacOSEngine(BaseEngine):
         self._tmp_dir = None
         self._final_output = None
         self._channels_seen = 0
+        self._airport_proc = None
 
     def check_ready(self) -> list:
         problems = []
@@ -106,24 +108,21 @@ class MacOSEngine(BaseEngine):
                     [self.airport_path, iface, "sniff", str(ch)],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 )
+                self._airport_proc = proc
                 self._stop_event.wait(dwell)
-                proc.terminate()
-                try:
-                    proc.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait(timeout=2)
+                terminate_process(proc, timeout=3)
+                self._airport_proc = None
                 # airport خروجی رو خودش در /tmp/airportSniffXXXXXX.cap می‌نویسه
                 after = set(glob.glob("/tmp/airportSniff*.cap"))
                 new_caps = sorted(after - before, key=os.path.getmtime)
                 if not new_caps:
-                    # fallback: جدیدترین فایل
                     all_caps = sorted(glob.glob("/tmp/airportSniff*.cap"), key=os.path.getmtime)
                     new_caps = all_caps[-1:] if all_caps else []
                 if new_caps:
                     shutil.move(new_caps[-1], tmp_file)
                     self._channels_seen += 1
             except Exception as e:
+                self._airport_proc = None
                 self._log(f"خطا در کانال {ch}: {e}")
             idx += 1
 
@@ -159,13 +158,22 @@ class MacOSEngine(BaseEngine):
         # آمار دقیق بسته نداریم؛ تعداد فایل‌های کانال دیده‌شده را به عنوان پروکسی می‌دهیم
         return self._channels_seen, {}
 
+    def is_capture_alive(self) -> bool:
+        if not self.state.running:
+            return False
+        if self._worker_thread and self._worker_thread.is_alive():
+            return True
+        return False
+
     def stop(self):
         if not self.state.running:
             return
         self._log("در حال توقف و ترکیب فایل‌های کپچر ...")
         self._stop_event.set()
+        terminate_process(self._airport_proc, timeout=3)
+        self._airport_proc = None
         if self._worker_thread:
-            self._worker_thread.join(timeout=max(5.0, 1.0))
+            self._worker_thread.join(timeout=5.0)
         self._worker_thread = None
 
         cap_files = sorted(glob.glob(os.path.join(self._tmp_dir or "", "*.cap")))
