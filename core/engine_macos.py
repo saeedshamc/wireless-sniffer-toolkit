@@ -37,14 +37,12 @@ def _run(cmd, check=False, timeout=None):
 
 
 class MacOSEngine(BaseEngine):
-    support_level = "experimental"
     caveats = [
         "ابزار airport فقط روی مک‌های قدیمی‌تر (اینتلی/Broadcom) موجوده و روی مک‌های "
         "اپل‌سیلیکون و نسخه‌های جدید macOS معمولاً وجود نداره.",
         "channel hopping با فراخوانی مکرر airport شبیه‌سازی می‌شه، نه واقعاً همزمان.",
         "آمار زنده SSID روی این موتور در دسترس نیست (کپچر ناپیوسته).",
-        "این بخش تست‌نشده روی سخت‌افزار واقعیه؛ اگه airport نبود، از یک ابزار مانیتورینگ "
-        "جایگزین مثل Wireshark به‌همراه یک آداپتور USB خارجی سازگار استفاده کنید.",
+        "این بخش تست‌نشده روی سخت‌افزار واقعیه؛ اگه airport نبود، از یک آداپتور USB خارجی سازگار استفاده کنید.",
     ]
 
     def __init__(self, on_log=None):
@@ -58,6 +56,14 @@ class MacOSEngine(BaseEngine):
         self._final_output = None
         self._channels_seen = 0
         self._airport_proc = None
+        if self.airport_path:
+            self.support_level = "experimental"
+        else:
+            self.support_level = "unsupported"
+            self.caveats = [
+                "airport روی این مک پیدا نشد — مانیتور مود native پشتیبانی نمی‌شود.",
+                "از آداپتور USB خارجی سازگار + لینوکس/ابزار مخصوص، یا مک قدیمی‌تر استفاده کنید.",
+            ]
 
     def check_ready(self) -> list:
         problems = []
@@ -98,7 +104,10 @@ class MacOSEngine(BaseEngine):
     def _hop_and_capture(self, iface: str, channels: list, dwell: float):
         idx = 0
         while not self._stop_event.is_set():
-            ch = channels[idx % len(channels)]
+            if self._channel_mode == "fixed" and self._fixed_channel is not None:
+                ch = int(self._fixed_channel)
+            else:
+                ch = channels[idx % len(channels)]
             self._current_channel = ch
             tmp_file = os.path.join(self._tmp_dir, f"ch{ch}_{idx:05d}.cap")
             self._log(f"کپچر کانال {ch} برای {dwell} ثانیه ...")
@@ -112,7 +121,6 @@ class MacOSEngine(BaseEngine):
                 self._stop_event.wait(dwell)
                 terminate_process(proc, timeout=3)
                 self._airport_proc = None
-                # airport خروجی رو خودش در /tmp/airportSniffXXXXXX.cap می‌نویسه
                 after = set(glob.glob("/tmp/airportSniff*.cap"))
                 new_caps = sorted(after - before, key=os.path.getmtime)
                 if not new_caps:
@@ -125,10 +133,25 @@ class MacOSEngine(BaseEngine):
                 self._airport_proc = None
                 self._log(f"خطا در کانال {ch}: {e}")
             idx += 1
+            if self._channel_mode == "fixed":
+                # روی کانال ثابت هم حلقه می‌زند تا سشن ادامه داشته باشد
+                pass
 
-    def start(self, iface: str, output_path: str, band: str, dwell: float):
+    def start(
+        self,
+        iface: str,
+        output_path: str,
+        band: str,
+        dwell: float,
+        channel_mode: str = "hop",
+        fixed_channel=None,
+    ):
         if self.state.running:
             raise EngineError("سشن قبلی هنوز فعاله.")
+        if self.support_level == "unsupported":
+            raise EngineError(
+                "مانیتور مود روی این مک پشتیبانی نمی‌شود (airport موجود نیست)."
+            )
         problems = self.check_ready()
         if problems:
             raise EngineError(" | ".join(problems))
@@ -140,8 +163,11 @@ class MacOSEngine(BaseEngine):
             raise EngineError(f"پوشهٔ خروجی وجود ندارد: {out_dir}")
 
         channels = channels_for_band(band)
+        self._channel_mode = channel_mode or "hop"
+        self._fixed_channel = fixed_channel
         self.state.original_iface = iface
         self.state.monitor_iface = iface
+        self.state.output_path = output_path
         self._final_output = output_path
         self._tmp_dir = tempfile.mkdtemp(prefix="wifi_monitor_mac_")
         self._channels_seen = 0

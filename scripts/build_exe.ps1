@@ -1,16 +1,18 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  ساخت فایل اجرایی WiFi-Monitor-Suite.exe با PyInstaller
+  ساخت فایل اجرایی WiFi-Monitor-Suite با PyInstaller
 
 .EXAMPLE
   .\scripts\build_exe.ps1
   .\scripts\build_exe.ps1 -Clean
+  .\scripts\build_exe.ps1 -OneFile
   .\scripts\build_exe.ps1 -SkipInstall
 #>
 param(
     [switch]$Clean,
     [switch]$SkipInstall,
+    [switch]$OneFile,
     [string]$Name = "WiFi-Monitor-Suite"
 )
 
@@ -43,6 +45,7 @@ $dist = Join-Path $Root "dist"
 $build = Join-Path $Root "build"
 $spec = Join-Path $Root "$Name.spec"
 $exe = Join-Path $dist "$Name.exe"
+$onedirExe = Join-Path $dist $Name "$Name.exe"
 
 if ($Clean) {
     Write-Host "==> پاک‌سازی build/dist/spec قبلی..." -ForegroundColor Yellow
@@ -64,15 +67,19 @@ if ($Clean) {
 
 $env:PYTHONPATH = $Root
 
+$bundleMode = if ($OneFile) { "--onefile" } else { "--onedir" }
+Write-Host "==> حالت بسته‌بندی: $bundleMode" -ForegroundColor Cyan
+
 $pyArgs = @(
     "-m", "PyInstaller",
     "--noconfirm",
     "--clean",
     "--windowed",
-    "--onefile",
+    $bundleMode,
     "--name", $Name,
     "--paths", $Root,
     "--collect-submodules", "core",
+    "--collect-submodules", "ui",
     "--hidden-import", "core",
     "--hidden-import", "core.engine_factory",
     "--hidden-import", "core.engine_windows",
@@ -83,6 +90,13 @@ $pyArgs = @(
     "--hidden-import", "core.export_utils",
     "--hidden-import", "core.process_utils",
     "--hidden-import", "core.base_engine",
+    "--hidden-import", "core.settings",
+    "--hidden-import", "core.alerts",
+    "--hidden-import", "core.oui_lookup",
+    "--hidden-import", "core.elevate",
+    "--hidden-import", "core.session_log",
+    "--hidden-import", "core.hardware_hints",
+    "--hidden-import", "ui.charts",
     "--exclude-module", "PySide6.QtWebEngineCore",
     "--exclude-module", "PySide6.QtWebEngineWidgets",
     "--exclude-module", "PySide6.QtWebEngineQuick",
@@ -102,12 +116,13 @@ if ($LASTEXITCODE -ne 0) {
     throw "بیلد PyInstaller ناموفق بود (exit=$LASTEXITCODE)."
 }
 
-if (-not (Test-Path $exe)) {
-    throw "فایل خروجی پیدا نشد: $exe"
+$outPath = if ($OneFile) { $exe } else { $onedirExe }
+if (-not (Test-Path $outPath)) {
+    throw "فایل خروجی پیدا نشد: $outPath"
 }
 
-$sizeMb = [math]::Round((Get-Item $exe).Length / 1MB, 1)
+$sizeMb = [math]::Round(((Get-Item $outPath).Length) / 1MB, 1)
 Write-Host ""
-Write-Host "OK  ساخته شد: $exe" -ForegroundColor Green
-Write-Host "    اندازه: $sizeMb MB" -ForegroundColor Green
+Write-Host "OK  ساخته شد: $outPath" -ForegroundColor Green
+Write-Host "    اندازه فایل اصلی: $sizeMb MB" -ForegroundColor Green
 Write-Host "    برای مانیتور مود: Run as Administrator" -ForegroundColor Yellow
