@@ -1,13 +1,5 @@
 """
 core/engine_windows.py — پیاده‌سازی ویندوز (پشتیبانی: "partial")
-
-روی ویندوز، مانیتور مود واقعی فقط از طریق WlanHelper.exe که همراه Npcap
-میاد امکان‌پذیره، و اون‌هم فقط روی کارت‌ها/درایورهایی که از OID مربوطه
-پشتیبانی کنن (اغلب چیپ‌ست‌های Atheros/بعضی Realtek با درایور مناسب؛
-خیلی از لپ‌تاپ‌های امروزی اصلاً ساپورت نمی‌کنن). این پیاده‌سازی روی همچین
-سیستم‌هایی fallback و best-effort محسوب می‌شه، نه یک تضمین.
-
-مرجع: مستندات Npcap درباره‌ی WlanHelper.
 """
 
 import os
@@ -17,6 +9,7 @@ import threading
 
 from .base_engine import BaseEngine, EngineError, channels_for_band
 from .capture_display import LiveDisplayReader
+from .hardware_hints import monitor_mode_failure_message
 from .platform_utils import (
     find_tshark, find_wlan_helper, is_admin,
     list_tshark_interfaces, looks_like_wireless, subprocess_creationflags,
@@ -40,7 +33,7 @@ class WindowsEngine(BaseEngine):
     caveats = [
         "مانیتور مود روی ویندوز فقط با WlanHelper.exe (بخشی از Npcap) و فقط روی درایورهای خاص کار می‌کنه.",
         "اکثر کارت‌های وای‌فای داخلی لپ‌تاپ‌های امروزی روی ویندوز این قابلیت رو پشتیبانی نمی‌کنن.",
-        "این بخش به‌صورت best-effort نوشته شده و لازمه روی سخت‌افزار واقعی خودتون تست/تنظیم بشه.",
+        "برای نتیجهٔ قابل‌اعتماد از آداپتور USB سازگار (مثل Alfa AWUS036ACH) استفاده کنید.",
         "برای کپچر، اینترفیس باید از لیست tshark انتخاب بشه؛ WlanHelper با نام دوستانهٔ کارت کار می‌کنه.",
     ]
 
@@ -50,7 +43,7 @@ class WindowsEngine(BaseEngine):
         self._hopper_thread = None
         self._capture_proc = None
         self._display_reader = None
-        self._iface_map = {}  # display label -> {tshark_name, wlan_name}
+        self._iface_map = {}
         self.tshark_path = find_tshark()
         self.wlan_helper = find_wlan_helper()
 
@@ -68,13 +61,8 @@ class WindowsEngine(BaseEngine):
         return problems
 
     def list_interfaces(self) -> list:
-        """
-        لیست اینترفیس‌ها از tshark -D (برای کپچر ضروری است).
-        برای WlanHelper، نام دوستانه (description) یا GUID استخراج می‌شود.
-        """
         self._iface_map.clear()
         labels = []
-
         tshark_ifaces = list_tshark_interfaces(self.tshark_path)
         wireless = []
         others = []
@@ -93,43 +81,30 @@ class WindowsEngine(BaseEngine):
                 wireless.append((label, meta))
             else:
                 others.append((label, meta))
-
         chosen = wireless or others
         for label, meta in chosen:
             self._iface_map[label] = meta
             labels.append(label)
-
         if labels:
             return labels
-
-        # fallback: فقط WlanHelper
         if self.wlan_helper:
             result = _run([self.wlan_helper])
             guids = re.findall(r"\{[0-9A-Fa-f-]{36}\}", result.stdout or "")
             for g in guids:
-                label = g
-                self._iface_map[label] = {
-                    "tshark": g,
-                    "wlan": g,
-                    "guid": g,
-                    "index": g,
-                }
-                labels.append(label)
+                self._iface_map[g] = {"tshark": g, "wlan": g, "guid": g, "index": g}
+                labels.append(g)
         return labels
 
     def _resolve_iface(self, selection: str) -> tuple:
-        """برمی‌گرداند (tshark_iface, wlan_helper_iface)."""
         mapped = self._iface_map.get(selection)
         if mapped:
             wlan = mapped["wlan"] or mapped["guid"] or mapped["tshark"]
-            # tshark روی ویندوز هم با ایندکس و هم با نام دستگاه کار می‌کنه
             tshark = mapped["tshark"] or mapped["index"]
             return tshark, wlan
         return selection, selection
 
     def _enable_monitor_mode(self, wlan_iface: str):
         self._log(f"تلاش برای مانیتور مود روی {wlan_iface} با WlanHelper ...")
-        # اول با نام دوستانه، بعد با GUID در صورت شکست
         attempts = [wlan_iface]
         mapped_guid = None
         for meta in self._iface_map.values():
@@ -148,10 +123,7 @@ class WindowsEngine(BaseEngine):
             last_err = (result.stderr or result.stdout or "").strip()
             self._log(f"WlanHelper mode monitor روی «{name}» ناموفق: {last_err}")
 
-        raise EngineError(
-            "فعال‌سازی مانیتور مود ناموفق بود. درایور/کارت احتمالاً OID مانیتور مود را "
-            f"پشتیبانی نمی‌کند. جزئیات: {last_err or 'نامشخص'}"
-        )
+        raise EngineError(monitor_mode_failure_message(last_err or "نامشخص"))
 
     def _disable_monitor_mode(self, wlan_iface: str):
         result = _run([self.wlan_helper, wlan_iface, "mode", "managed"])
@@ -159,17 +131,30 @@ class WindowsEngine(BaseEngine):
             err = (result.stderr or result.stdout or "").strip()
             self._log(f"هشدار در بازگردانی حالت managed: {err or 'نامشخص'}")
 
+    def _set_channel(self, wlan_iface: str, ch: int) -> bool:
+        result = _run([self.wlan_helper, wlan_iface, "channel", str(ch)])
+        if result.returncode == 0:
+            self._current_channel = ch
+            return True
+        return False
+
     def _channel_hopper(self, wlan_iface: str, channels: list, dwell: float):
         idx = 0
         while not self._stop_event.is_set():
             ch = channels[idx % len(channels)]
-            result = _run([self.wlan_helper, wlan_iface, "channel", str(ch)])
-            if result.returncode == 0:
-                self._current_channel = ch
+            self._set_channel(wlan_iface, ch)
             idx += 1
             self._stop_event.wait(dwell)
 
-    def start(self, iface: str, output_path: str, band: str, dwell: float):
+    def start(
+        self,
+        iface: str,
+        output_path: str,
+        band: str,
+        dwell: float,
+        channel_mode: str = "hop",
+        fixed_channel=None,
+    ):
         if self.state.running:
             raise EngineError("سشن قبلی هنوز فعاله.")
         problems = self.check_ready()
@@ -185,15 +170,22 @@ class WindowsEngine(BaseEngine):
         tshark_iface, wlan_iface = self._resolve_iface(iface)
         channels = channels_for_band(band)
         self.state.original_iface = wlan_iface
+        self.state.output_path = output_path
+        self._channel_mode = channel_mode or "hop"
+        self._fixed_channel = fixed_channel
 
         active_wlan = self._enable_monitor_mode(wlan_iface)
         self.state.monitor_iface = active_wlan
 
         self._stop_event.clear()
-        self._hopper_thread = threading.Thread(
-            target=self._channel_hopper, args=(active_wlan, channels, dwell), daemon=True
-        )
-        self._hopper_thread.start()
+        if self._channel_mode == "fixed" and fixed_channel is not None:
+            self._log(f"قفل کانال روی {fixed_channel}")
+            self._set_channel(active_wlan, int(fixed_channel))
+        else:
+            self._hopper_thread = threading.Thread(
+                target=self._channel_hopper, args=(active_wlan, channels, dwell), daemon=True
+            )
+            self._hopper_thread.start()
 
         self._log(f"شروع ذخیره کپچر روی «{tshark_iface}» -> {output_path}")
         try:
@@ -219,13 +211,17 @@ class WindowsEngine(BaseEngine):
             self.tshark_path, tshark_iface, on_error=self._log
         )
         self._display_reader.start()
-
         self.state.running = True
 
     def get_live_stats(self):
         if self._display_reader:
             return self._display_reader.snapshot()
         return 0, {}
+
+    def get_live_full(self) -> dict:
+        if self._display_reader:
+            return self._display_reader.snapshot_full()
+        return super().get_live_full()
 
     def is_capture_alive(self) -> bool:
         return process_is_alive(self._capture_proc)
@@ -251,5 +247,6 @@ class WindowsEngine(BaseEngine):
 
         self._current_channel = None
         self.state.monitor_iface = ""
+        self.state.output_path = ""
         self.state.running = False
         self._log("متوقف شد.")

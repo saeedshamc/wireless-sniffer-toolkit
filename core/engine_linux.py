@@ -63,7 +63,6 @@ class LinuxEngine(BaseEngine):
             return preferred
         if created:
             return sorted(created)[0]
-        # بعضی درایورها اسم رو عوض نمی‌کنن
         return preferred if preferred in after else (sorted(after)[0] if after else preferred)
 
     def _enable_monitor_mode(self, iface: str) -> str:
@@ -72,8 +71,6 @@ class LinuxEngine(BaseEngine):
         self._nm_stopped = False
 
         if shutil.which("airmon-ng"):
-            # به‌جای check kill کامل، فقط NetworkManager رو موقتاً متوقف می‌کنیم
-            # تا پروسهٔ کاربر (مثل مرورگر) بی‌دلیل کشته نشه.
             nm = shutil.which("systemctl")
             if nm:
                 status = _run(["systemctl", "is-active", "NetworkManager"])
@@ -84,11 +81,9 @@ class LinuxEngine(BaseEngine):
             before = set(self.list_interfaces())
             result = _run(["airmon-ng", "start", iface])
             self._used_airmon = True
-            # airmon معمولاً iface + "mon" می‌سازه؛ ولی همیشه نه
             preferred = f"{iface}mon"
             mon = self._discover_monitor_iface(before, preferred)
             if mon not in self.list_interfaces():
-                # پیام خطا از airmon
                 detail = (result.stderr or result.stdout or "").strip()
                 raise EngineError(
                     f"مانیتور مود روی {iface} فعال نشد. "
@@ -115,17 +110,30 @@ class LinuxEngine(BaseEngine):
                 self._log("NetworkManager دوباره راه‌اندازی شد.")
                 self._nm_stopped = False
 
+    def _set_channel(self, iface: str, ch: int) -> bool:
+        result = _run(["iw", "dev", iface, "set", "channel", str(ch)])
+        if result.returncode == 0:
+            self._current_channel = ch
+            return True
+        return False
+
     def _channel_hopper(self, iface: str, channels: list, dwell: float):
         idx = 0
         while not self._stop_event.is_set():
             ch = channels[idx % len(channels)]
-            result = _run(["iw", "dev", iface, "set", "channel", str(ch)])
-            if result.returncode == 0:
-                self._current_channel = ch
+            self._set_channel(iface, ch)
             idx += 1
             self._stop_event.wait(dwell)
 
-    def start(self, iface: str, output_path: str, band: str, dwell: float):
+    def start(
+        self,
+        iface: str,
+        output_path: str,
+        band: str,
+        dwell: float,
+        channel_mode: str = "hop",
+        fixed_channel=None,
+    ):
         if self.state.running:
             raise EngineError("سشن قبلی هنوز فعاله.")
         problems = self.check_ready()
@@ -138,8 +146,11 @@ class LinuxEngine(BaseEngine):
         if not os.path.isdir(out_dir):
             raise EngineError(f"پوشهٔ خروجی وجود ندارد: {out_dir}")
 
+        self._channel_mode = channel_mode or "hop"
+        self._fixed_channel = fixed_channel
         channels = channels_for_band(band)
         self.state.original_iface = iface
+        self.state.output_path = output_path
         self._log(f"فعال‌سازی مانیتور مود روی {iface} ...")
         try:
             mon_iface = self._enable_monitor_mode(iface)
@@ -153,10 +164,14 @@ class LinuxEngine(BaseEngine):
         self._log(f"اینترفیس مانیتور: {mon_iface}")
 
         self._stop_event.clear()
-        self._hopper_thread = threading.Thread(
-            target=self._channel_hopper, args=(mon_iface, channels, dwell), daemon=True
-        )
-        self._hopper_thread.start()
+        if self._channel_mode == "fixed" and fixed_channel is not None:
+            self._log(f"قفل کانال روی {fixed_channel}")
+            self._set_channel(mon_iface, int(fixed_channel))
+        else:
+            self._hopper_thread = threading.Thread(
+                target=self._channel_hopper, args=(mon_iface, channels, dwell), daemon=True
+            )
+            self._hopper_thread.start()
 
         self._log(f"شروع ذخیره کپچر -> {output_path}")
         try:
@@ -181,13 +196,17 @@ class LinuxEngine(BaseEngine):
             self.tshark_path, mon_iface, on_error=self._log
         )
         self._display_reader.start()
-
         self.state.running = True
 
     def get_live_stats(self):
         if self._display_reader:
             return self._display_reader.snapshot()
         return 0, {}
+
+    def get_live_full(self) -> dict:
+        if self._display_reader:
+            return self._display_reader.snapshot_full()
+        return super().get_live_full()
 
     def is_capture_alive(self) -> bool:
         return process_is_alive(self._capture_proc)
@@ -217,5 +236,6 @@ class LinuxEngine(BaseEngine):
 
         self._current_channel = None
         self.state.monitor_iface = ""
+        self.state.output_path = ""
         self.state.running = False
         self._log("متوقف شد.")

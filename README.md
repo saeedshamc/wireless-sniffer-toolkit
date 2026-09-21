@@ -1,46 +1,19 @@
 # Wi-Fi Monitor Suite v2
 
-نرم‌افزار گرافیکی (PySide6) برای مانیتورینگ خودکار وای‌فای: مانیتور مود،
-channel hopping، کپچر با tshark، و نمایش زنده‌ی بسته‌ها/SSIDها روی
-یک داشبورد با تم تیره. روی هر سه پلتفرم (لینوکس/ویندوز/مک) اجرا می‌شود؛
-سطح واقعی پشتیبانی هر کدام متفاوت است.
+نرم‌افزار گرافیکی (PySide6) برای مانیتورینگ وای‌فای: مانیتور مود، channel hopping
+یا قفل کانال، کپچر tshark، جدول زنده AP/Client، نمودار سیگنال و heatmap کانال.
 
-## ساختار پروژه
+## قابلیت‌های کلیدی
 
-```
-wireless-sniffer-toolkit/
-├── main_gui.py              # رابط گرافیکی (PySide6)
-├── __main__.py              # python -m از ریشه پروژه
-├── requirements.txt
-├── requirements-build.txt   # PyInstaller برای ساخت exe
-├── scripts/
-│   ├── build_exe.bat        # ساخت exe با دابل‌کلیک (ویندوز)
-│   ├── build_exe.ps1        # اسکریپت اصلی بیلد
-│   └── clean.bat            # پاک‌سازی build/dist
-├── README.md
-├── LICENSE
-├── tests/
-└── core/
-    ...
-```
-
-## ساخت فایل اجرایی (ویندوز)
-
-```bat
-scripts\build_exe.bat
-```
-
-یا در PowerShell:
-
-```powershell
-.\scripts\build_exe.ps1
-.\scripts\build_exe.ps1 -Clean
-```
-
-خروجی:
-`dist\WiFi-Monitor-Suite.exe`
-
-برای مانیتور مود، exe را با Run as Administrator اجرا کنید.
+- حالت **Hopping** یا **قفل کانال**
+- جدول Networks با Encryption / Vendor / Channel Width
+- تب **Clients** و تب **Channels** (heatmap)
+- فیلتر: متن، Hidden، حداقل dBm، نوع رمز
+- هشدار **Evil Twin** (SSID مشترک با چند BSSID)
+- ذخیره تنظیمات در `settings.json`
+- لاگ فایل سشن، نمایش حجم فایل کپچر، راهنمای سخت‌افزار
+- CLI بدون GUI: `python cli.py`
+- Auto-elevate روی ویندوز (UAC)
 
 ## نصب
 
@@ -48,32 +21,33 @@ scripts\build_exe.bat
 pip install -r requirements.txt
 ```
 
-ابزارهای سیستمی:
-
-**لینوکس** (کامل):
-```bash
-sudo apt install aircrack-ng tshark wireless-tools iw
-```
-
-**ویندوز** (جزئی):
-- Wireshark (شامل tshark)
-- Npcap با **"Support raw 802.11 traffic (and monitor mode)"**
-- اجرا با **Run as Administrator**
-
-**مک** (تجربی):
-- `airport` روی مک‌های قدیمی؛ روی Apple Silicon معمولاً نیست
-- `mergecap` از Wireshark برای ترکیب کپچرها
+**لینوکس:** `sudo apt install aircrack-ng tshark iw`  
+**ویندوز:** Wireshark + Npcap (raw 802.11) + Run as Administrator  
+**مک:** فقط با `airport` روی سخت‌افزار قدیمی؛ در غیر این صورت unsupported
 
 ## اجرا
 
 ```bash
-# لینوکس/مک
-sudo python3 main_gui.py
-# یا
-sudo python3 -m .
+# GUI
+sudo python3 main_gui.py          # لینوکس/مک
+python main_gui.py                # ویندوز (Admin)
 
-# ویندوز (Administrator)
-python main_gui.py
+# CLI
+python cli.py --list-ifaces
+python cli.py --iface wlan0 --band 2.4 --output capture.pcapng --duration 60
+python cli.py --iface wlan0 --channel-mode fixed --channel 6 --csv-networks nets.csv
+```
+
+## ساخت exe (ویندوز)
+
+```bat
+scripts\build_exe.bat
+```
+
+پیش‌فرض **onedir** (استارت سریع‌تر). برای تک‌فایل:
+
+```powershell
+.\scripts\build_exe.ps1 -OneFile -Clean
 ```
 
 ## تست
@@ -82,26 +56,11 @@ python main_gui.py
 python -m unittest discover -s tests -v
 ```
 
-تست‌ها بدون سخت‌افزار مانیتور مود اجرا می‌شوند (پارس، کانال، CSV، دود GUI).
+## سخت‌افزار پیشنهادی
 
-## قابلیت‌ها
-
-- جدول زنده: SSID / BSSID / کانال / سیگنال / تعداد بسته
-- فیلتر زنده روی جدول + خروجی CSV
-- تایمر مدت سشن + هشدار قطع شدن فرآیند کپچر
-- thread-safe start/stop با Signalهای Qt
-- readiness در استارت (sudo/Npcap/tshark/…)
-- لینوکس: `iw`/`airmon-ng` + مدیریت موقت NetworkManager
-- ویندوز: `WlanHelper` + اولویت اینترفیس‌های وای‌فای از `tshark -D`
-- مک: hopping شبیه‌سازی‌شده با `airport` + `mergecap`
-
-## محدودیت‌ها
-
-مانیتور مود سطح درایور است:
-- لینوکس: وابسته به chipset
-- ویندوز: وابسته به Npcap + درایور
-- مک: عملاً سخت‌افزار قدیمی یا آداپتور USB
+اکثر کارت‌های داخلی لپ‌تاپ روی ویندوز مانیتور مود ندارند. آداپتورهای USB مثل
+Alfa AWUS036ACH / AWUS036NHA یا TP-Link TL-WN722N v1 معمولاً گزینهٔ بهتری‌اند.
 
 ## نکته حقوقی
 
-فقط روی شبکه‌ی خودتان یا با مجوز رسمی استفاده کنید.
+فقط روی شبکهٔ خودتان یا با مجوز رسمی استفاده کنید.
