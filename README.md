@@ -12,20 +12,35 @@ wireless-sniffer-toolkit/
 ├── main_gui.py              # رابط گرافیکی (PySide6)
 ├── __main__.py              # python -m از ریشه پروژه
 ├── requirements.txt
+├── requirements-build.txt   # PyInstaller برای ساخت exe
+├── scripts/
+│   ├── build_exe.bat        # ساخت exe با دابل‌کلیک (ویندوز)
+│   ├── build_exe.ps1        # اسکریپت اصلی بیلد
+│   └── clean.bat            # پاک‌سازی build/dist
 ├── README.md
 ├── LICENSE
-├── tests/                   # تست‌های واحد و دود GUI
+├── tests/
 └── core/
-    ├── base_engine.py       # قرارداد مشترک + کانال‌ها
-    ├── platform_utils.py    # OS و کشف ابزارها
-    ├── process_utils.py     # توقف امن فرآیندها
-    ├── capture_display.py   # پارس زنده tshark
-    ├── export_utils.py      # خروجی CSV شبکه‌ها
-    ├── engine_linux.py      # لینوکس (کامل)
-    ├── engine_windows.py    # ویندوز (جزئی)
-    ├── engine_macos.py      # مک (تجربی)
-    └── engine_factory.py
+    ...
 ```
+
+## ساخت فایل اجرایی (ویندوز)
+
+```bat
+scripts\build_exe.bat
+```
+
+یا در PowerShell:
+
+```powershell
+.\scripts\build_exe.ps1
+.\scripts\build_exe.ps1 -Clean
+```
+
+خروجی:
+`dist\WiFi-Monitor-Suite.exe`
+
+برای مانیتور مود، exe را با Run as Administrator اجرا کنید.
 
 ## نصب
 
